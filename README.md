@@ -1,3 +1,18 @@
+# wsvsock
+
+Firecracker's vsock to a WebSocket proxy. Based on [wstcp](https://github.com/sile/wstcp) with minor changes. Not intended for general use. This tool will probably not fix your problems.
+
+Changes compared to the original `wstcp`:
+
+- allows connections only to numerical paths `/[0-9]+`
+- uses UNIX socket instead of a TCP socket
+- when a new WS connection comes in, the number from the request path is supplied to the UNIX socket in a string `CONNECT [num]` (see [Firecracker docs](https://github.com/firecracker-microvm/firecracker/blob/main/docs/vsock.md)).
+
+
+Original `wstcp` README.md follows:
+
+----
+
 wstcp
 =====
 
