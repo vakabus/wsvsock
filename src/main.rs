@@ -4,11 +4,12 @@ extern crate clap;
 extern crate trackable;
 
 use async_std::net::TcpListener;
+use async_std::path::PathBuf;
 use clap::Arg;
 use sloggers::terminal::{Destination, TerminalLoggerBuilder};
 use sloggers::types::SourceLocation;
 use sloggers::Build;
-use std::net::{SocketAddr, ToSocketAddrs};
+use std::net::SocketAddr;
 use wstcp::ProxyServer;
 
 mod error;
@@ -45,14 +46,7 @@ fn main() -> trackable::result::TopLevelResult {
         .get_matches();
 
     let bind_addr: SocketAddr = try_parse!(matches.value_of("BIND_ADDR").unwrap())?;
-    let tcp_server_addr: SocketAddr = track_assert_some!(
-        track_any_err!(matches
-            .value_of("REAL_SERVER_ADDR")
-            .unwrap()
-            .to_socket_addrs())?
-        .next(),
-        trackable::error::Failed
-    );
+    let tcp_server_addr: PathBuf = PathBuf::from(matches.value_of("REAL_SERVER_ADDR").unwrap());  // FIXME missing error handling
     let log_level = try_parse!(matches.value_of("LOG_LEVEL").unwrap())?;
     let logger = track!(TerminalLoggerBuilder::new()
         .source_location(SourceLocation::None)

@@ -2,6 +2,7 @@ use crate::channel::ProxyChannel;
 use crate::{Error, Result};
 use async_std::net::{TcpListener, Incoming};
 use async_std::stream::{Stream, StreamExt};
+use async_std::path::PathBuf;
 use slog::Logger;
 use std::future::Future;
 use std::net::SocketAddr;
@@ -14,19 +15,19 @@ use std::task::Poll;
 pub struct ProxyServer<'a> {
     logger: Logger,
     _proxy_addr: SocketAddr,
-    real_server_addr: SocketAddr,
     incoming: Incoming<'a>,
+    real_server_addr: PathBuf,
 }
 impl<'a> ProxyServer<'a> {
     /// Makes a new `ProxyServer` instance.
     pub async fn new(
         logger: Logger,
         proxy_addr: SocketAddr,
-        real_server_addr: SocketAddr,
+        real_server_addr: PathBuf,
         listener: &'a TcpListener,
     ) -> Result<ProxyServer<'a>> {
         let logger = logger.new(
-            o!("proxy_addr" => proxy_addr.to_string(), "server_addr" => real_server_addr.to_string()),
+            o!("proxy_addr" => proxy_addr.to_string(), "server_addr" => real_server_addr.as_os_str().to_string_lossy().to_string()),
         );
         info!(logger, "Starts a WebSocket proxy server");
         let incoming = listener.incoming();
@@ -63,7 +64,7 @@ impl<'a> Future for ProxyServer<'a> {
                     debug!(this.logger, "New client arrived: {}", addr);
 
                     let logger = this.logger.new(o!("client_addr" => addr.to_string()));
-                    let channel = ProxyChannel::new(logger.clone(), stream, this.real_server_addr);
+                    let channel = ProxyChannel::new(logger.clone(), stream, this.real_server_addr.clone());
                     async_std::task::spawn(async move {
                         match channel.await {
                             Err(e) => {

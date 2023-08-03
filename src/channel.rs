@@ -1,7 +1,10 @@
 use crate::frame::{Frame, FrameDecoder, FrameEncoder};
 use crate::util::{self, WebSocketKey};
 use crate::{Error, ErrorKind, Result};
+use async_std::io::{WriteExt, ReadExt};
 use async_std::net::TcpStream;
+use async_std::os::unix::net::UnixStream;
+use async_std::path::PathBuf;
 use bytecodec::io::{IoDecodeExt, IoEncodeExt, ReadBuf, StreamState, WriteBuf};
 use bytecodec::{Decode, Encode, EncodeExt};
 use httpcodec::{
@@ -10,8 +13,8 @@ use httpcodec::{
 };
 use slog::Logger;
 use std::future::Future;
+use std::io::Write;
 use std::mem;
-use std::net::SocketAddr;
 use std::pin::Pin;
 use std::task::Context;
 use std::task::Poll;
@@ -24,10 +27,12 @@ pub struct ProxyChannel {
     ws_stream: TcpStream,
     ws_rbuf: ReadBuf<Vec<u8>>,
     ws_wbuf: WriteBuf<Vec<u8>>,
-    real_server_addr: SocketAddr,
-    real_stream: Option<TcpStream>,
+    real_server_addr: PathBuf,
+    real_stream: Option<UnixStream>,
     real_stream_rstate: StreamState,
     real_stream_wstate: StreamState,
+    handshake_real_rbuf: ReadBuf<Vec<u8>>,
+    handshake_real_wbuf: WriteBuf<Vec<u8>>,
     handshake: Handshake,
     closing: Closing,
     pending_pong: Option<Vec<u8>>,
@@ -36,7 +41,7 @@ pub struct ProxyChannel {
     frame_encoder: FrameEncoder,
 }
 impl ProxyChannel {
-    pub fn new(logger: Logger, ws_stream: TcpStream, real_server_addr: SocketAddr) -> Self {
+    pub fn new(logger: Logger, ws_stream: TcpStream, real_server_addr: PathBuf) -> Self {
         let _ = ws_stream.set_nodelay(true);
         info!(logger, "New proxy channel is created");
         ProxyChannel {
@@ -48,6 +53,8 @@ impl ProxyChannel {
             real_stream: None,
             real_stream_rstate: StreamState::Normal,
             real_stream_wstate: StreamState::Normal,
+            handshake_real_rbuf: ReadBuf::new(vec![0; BUF_SIZE]),
+            handshake_real_wbuf: WriteBuf::new(vec![0; BUF_SIZE]),
             handshake: Handshake::new(),
             closing: Closing::NotYet,
             pending_pong: None,
@@ -61,6 +68,7 @@ impl ProxyChannel {
         loop {
             match mem::replace(&mut self.handshake, Handshake::Done) {
                 Handshake::RecvRequest(mut decoder) => {
+                    debug!(self.logger, "recv request state");
                     let result = decoder.decode_from_read_buf(&mut self.ws_rbuf);
                     if result.is_ok() && !decoder.is_idle() {
                         self.handshake = Handshake::RecvRequest(decoder);
@@ -88,7 +96,7 @@ impl ProxyChannel {
                                 }
                                 Ok(key) => {
                                     debug!(self.logger, "Tries to connect the real server");
-                                    let future = TcpStream::connect(self.real_server_addr);
+                                    let future = UnixStream::connect(self.real_server_addr.clone());
                                     self.handshake =
                                         Handshake::ConnectToRealServer(Box::pin(future), key);
                                 }
@@ -97,6 +105,7 @@ impl ProxyChannel {
                     }
                 }
                 Handshake::ConnectToRealServer(mut f, key) => {
+                    debug!(self.logger, "connect to real server statte");
                     match Pin::new(&mut f).poll(cx).map_err(Error::from) {
                         Poll::Pending => {
                             self.handshake = Handshake::ConnectToRealServer(f, key);
@@ -108,15 +117,46 @@ impl ProxyChannel {
                         }
                         Poll::Ready(Ok(stream)) => {
                             debug!(self.logger, "Connected to the real server");
-                            let _ = stream.set_nodelay(true);
                             if let Ok(addr) = stream.local_addr() {
-                                self.logger = self.logger.new(o!("relay_addr" => addr.to_string()));
+                                if let Some(addr) = addr.as_pathname() {
+                                    self.logger = self.logger.new(o!("relay_addr" => addr.to_string_lossy().to_string()));
+                                }
                             }
-                            self.handshake = Handshake::response_accepted(&key);
-                            self.real_stream = Some(stream);
+
+                            self.real_stream.insert(stream);
+                            self.handshake_real_wbuf.write_fmt(format_args!("CONNECT {}\n", key.target));
+                            self.handshake = Handshake::FirecrackerSendCONNECT(key);
                         }
                     }
                 }
+                Handshake::FirecrackerSendCONNECT(key) => {
+                    debug!(self.logger, "send-connect state");
+                    let writer = SyncWriter::new(self.real_stream.as_mut().unwrap(), cx);
+                    self.handshake_real_wbuf.flush(writer);
+
+                    if ! self.handshake_real_wbuf.is_empty() {
+                        self.handshake = Handshake::FirecrackerSendCONNECT(key);
+                        break;
+                    } else {
+                        debug!(self.logger, "CONNECT command sent, awaiting response");                            
+                        self.handshake = Handshake::FirecrackerRecvOK(key);
+                    }
+                },
+                Handshake::FirecrackerRecvOK(key) => {
+                    let reader = SyncReader::new(self.real_stream.as_mut().unwrap(), cx);
+                    self.handshake_real_rbuf.fill(reader);
+
+                    if self.handshake_real_rbuf.inner_ref().ends_with(b"\n") {
+                        /* not the end of the line, wait some more */
+                        self.handshake = Handshake::FirecrackerRecvOK(key);
+                        break;
+                    } else {
+                        debug!(self.logger, "Receiving Firecracker confirmation handshake");
+                            
+                        /* end of line, end of handshake */
+                        self.handshake = Handshake::response_accepted(&key);
+                    }
+                },
                 Handshake::SendResponse(mut encoder, succeeded) => {
                     if let Err(e) = track!(encoder.encode_to_write_buf(&mut self.ws_wbuf)) {
                         warn!(self.logger, "Cannot write a handshake response: {}", e);
@@ -168,7 +208,7 @@ impl ProxyChannel {
         }
 
         let key = track_assert_some!(key, ErrorKind::InvalidInput);
-        Ok(WebSocketKey(key))
+        Ok(WebSocketKey{key, target: request.request_target().to_string()})
     }
 
     fn process_relay(&mut self, cx: &mut Context) -> Result<()> {
@@ -333,9 +373,11 @@ impl Future for ProxyChannel {
 enum Handshake {
     RecvRequest(RequestDecoder<NoBodyDecoder>),
     ConnectToRealServer(
-        Pin<Box<(dyn Future<Output = async_std::io::Result<TcpStream>> + Send + 'static)>>,
+        Pin<Box<(dyn Future<Output = async_std::io::Result<UnixStream>> + Send + 'static)>>,
         WebSocketKey,
     ),
+    FirecrackerSendCONNECT(WebSocketKey),
+    FirecrackerRecvOK(WebSocketKey),
     SendResponse(ResponseEncoder<NoBodyEncoder>, bool),
     Done,
 }
