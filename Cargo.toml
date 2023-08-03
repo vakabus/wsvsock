@@ -1,17 +1,14 @@
 [package]
-name = "wstcp"
+name = "wsvsock"
 version = "0.2.0"
-authors = ["Takeru Ohta <phjgt308@gmail.com>"]
-description = "WebSocket to TCP proxy server"
-homepage = "https://github.com/sile/wstcp"
-repository = "https://github.com/sile/wstcp"
+authors = ["Takeru Ohta <phjgt308@gmail.com>", "Vasek Sraier <git@vakabus.cz>"]
+description = "WebSocket to Firecracker's Virtio-vsock proxy server"
+homepage = "https://github.com/vakabus/wsvsock"
+repository = "https://github.com/vakabus/wsvsock"
 readme = "README.md"
-keywords = ["websocket", "proxy", "tcp"]
+keywords = ["websocket", "proxy", "virtio-vsock", "firecracker"]
 license = "MIT"
 edition = "2018"
-
-[badges]
-coveralls = {repository = "sile/wstcp"}
 
 [dependencies]
 async-std = "1.0"

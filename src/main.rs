@@ -9,8 +9,8 @@ use clap::Arg;
 use sloggers::terminal::{Destination, TerminalLoggerBuilder};
 use sloggers::types::SourceLocation;
 use sloggers::Build;
+use wsvsock::ProxyServer;
 use std::net::SocketAddr;
-use wstcp::ProxyServer;
 
 mod error;
 
