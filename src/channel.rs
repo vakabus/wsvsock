@@ -152,7 +152,7 @@ impl ProxyChannel {
                     self.handshake_real_rbuf.fill(reader);
 
                     let len = self.handshake_real_rbuf.len();
-                    if len > 0 && ! self.handshake_real_rbuf.inner_ref()[len-1] == b'\n' {
+                    if len == 0 || ! self.handshake_real_rbuf.inner_ref()[len-1] == b'\n' {
                         /* not the end of the line, wait some more */
                         self.handshake = Handshake::FirecrackerRecvOK(key);
                         break;
