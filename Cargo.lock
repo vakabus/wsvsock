@@ -1350,6 +1350,7 @@ dependencies = [
  "byteorder",
  "clap",
  "httpcodec",
+ "regex",
  "sha-1",
  "slog",
  "sloggers",

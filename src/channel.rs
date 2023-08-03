@@ -11,6 +11,7 @@ use httpcodec::{
     HeaderField, HttpVersion, NoBodyDecoder, NoBodyEncoder, ReasonPhrase, Request, RequestDecoder,
     Response, ResponseEncoder, StatusCode,
 };
+use regex::Regex;
 use slog::Logger;
 use std::future::Future;
 use std::io::Write;
@@ -68,7 +69,6 @@ impl ProxyChannel {
         loop {
             match mem::replace(&mut self.handshake, Handshake::Done) {
                 Handshake::RecvRequest(mut decoder) => {
-                    debug!(self.logger, "recv request state");
                     let result = decoder.decode_from_read_buf(&mut self.ws_rbuf);
                     if result.is_ok() && !decoder.is_idle() {
                         self.handshake = Handshake::RecvRequest(decoder);
@@ -86,26 +86,31 @@ impl ProxyChannel {
                             debug!(self.logger, "Version: {}", request.http_version());
                             debug!(self.logger, "Header: {}", request.header());
 
-                            match track!(self.handle_handshake_request(&request)) {
-                                Err(e) => {
-                                    warn!(
-                                        self.logger,
-                                        "Invalid WebSocket handshake request: {}", e
-                                    );
-                                    self.handshake = Handshake::response_bad_request();
-                                }
-                                Ok(key) => {
-                                    debug!(self.logger, "Tries to connect the real server");
-                                    let future = UnixStream::connect(self.real_server_addr.clone());
-                                    self.handshake =
-                                        Handshake::ConnectToRealServer(Box::pin(future), key);
+                            // drop requests when they do not contain numerical target
+                            let target = request.request_target().to_string();
+                            if ! Regex::new("/[0-9]+").unwrap().is_match(&target) {
+                                self.handshake = Handshake::response_unavailable();
+                            } else {
+                                match track!(self.handle_handshake_request(&request)) {
+                                    Err(e) => {
+                                        warn!(
+                                            self.logger,
+                                            "Invalid WebSocket handshake request: {}", e
+                                        );
+                                        self.handshake = Handshake::response_bad_request();
+                                    }
+                                    Ok(key) => {
+                                        debug!(self.logger, "Tries to connect the real server");
+                                        let future = UnixStream::connect(self.real_server_addr.clone());
+                                        self.handshake =
+                                            Handshake::ConnectToRealServer(Box::pin(future), key);
+                                    }
                                 }
                             }
                         }
                     }
                 }
                 Handshake::ConnectToRealServer(mut f, key) => {
-                    debug!(self.logger, "connect to real server statte");
                     match Pin::new(&mut f).poll(cx).map_err(Error::from) {
                         Poll::Pending => {
                             self.handshake = Handshake::ConnectToRealServer(f, key);
@@ -116,7 +121,6 @@ impl ProxyChannel {
                             self.handshake = Handshake::response_unavailable();
                         }
                         Poll::Ready(Ok(stream)) => {
-                            debug!(self.logger, "Connected to the real server");
                             if let Ok(addr) = stream.local_addr() {
                                 if let Some(addr) = addr.as_pathname() {
                                     self.logger = self.logger.new(o!("relay_addr" => addr.to_string_lossy().to_string()));
@@ -124,7 +128,8 @@ impl ProxyChannel {
                             }
 
                             self.real_stream.insert(stream);
-                            self.handshake_real_wbuf.write_fmt(format_args!("CONNECT {}\n", key.target));
+                            self.handshake_real_wbuf.write_fmt(format_args!("CONNECT {}\n", &key.target[1..]));
+                            debug!(self.logger, "Sending Firecracker vsock handshake: {}", format!("CONNECT {}\n", &key.target[1..]));
                             self.handshake = Handshake::FirecrackerSendCONNECT(key);
                         }
                     }
